@@ -1,0 +1,188 @@
+---
+title: "Homework6"
+author: "Hao Zheng(hz2772)"
+date: "12/2/2021"
+output: github_document
+---
+
+```{r, echo = FALSE, message = FALSE}
+library(tidyverse)
+library(corrplot)
+library(modelr)
+library(mgcv)
+library(patchwork)
+library(purrr)
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+# Problem 1
+
+## variable selection
+
+```{r}
+bw_df = 
+  read.csv("./data/birthweight.csv") %>%
+  mutate(babysex=as.factor(babysex),
+         frace=as.factor(frace),
+         malform=as.factor(malform),
+         mrace=as.factor(mrace)) %>%
+  drop_na()
+```
+I have found that variables "pnumlbw" and "pnumsga" are all equal to 0, which will be meaningless to add them into the model, so we can delete them.
+```{r}
+bw_df = 
+  bw_df %>%
+  select(-pnumlbw,-pnumsga)
+bw_fit_all = lm(bwt ~.,data = bw_df)
+summary(bw_fit_all)
+```
+Put all variables into the regression model, the coefficent of "wtgain" is NA because of singularities. Let's check the correlations between independent variables.
+```{r}
+bw_var = 
+  bw_df %>% 
+  select(-bwt) %>%
+  mutate(
+    babysex=as.numeric(babysex),
+    bhead=as.numeric(bhead),
+    blength=as.numeric(blength),
+    delwt=as.numeric(delwt),
+    fincome=as.numeric(fincome),
+    frace=as.numeric(frace),
+    gaweeks=as.numeric(gaweeks),
+    malform=as.numeric(malform),
+    menarche=as.numeric(menarche),
+    mheight=as.numeric(mheight),
+    momage=as.numeric(momage),
+    mrace=as.numeric(mrace),
+    parity=as.numeric(parity),
+    ppbmi=as.numeric(ppbmi),
+    ppwt=as.numeric(ppwt),
+    smoken=as.numeric(smoken),
+    wtgain=as.numeric(wtgain)
+  )
+corr <- cor(bw_var)
+corrplot(corr, method = "square", order = "FPC")
+```
+
+According to the plot, I find that delwt, ppwt and ppbmi have strong correlations, frace and mrace have strong correlation. I would manipulate variables for reasons as follow:
+
+* ppbmi is calculated by ppwt/(mheight)^2, I will drop the ppwt variable from this model.
+
+* delwt is calculated by ppwt+wtgain, I will drop the delwt variable from this midel.
+
+* Although mfrace and frace have strong correlations, I will keep them because of the interest.
+
+## modelling
+```{r}
+bw_regre_df = 
+  bw_df %>%
+  select(-ppwt,-delwt)
+bw_regre_fit = lm(bwt ~.,data = bw_regre_df)
+summary(bw_regre_fit)
+
+bw_regre_fit %>% 
+  broom::glance()
+bw_regre_fit %>% 
+  broom::tidy()
+```
+This model's adjusted R-square is 0.717, which can explain most of the babyweight variable without the influence of strong correlations. And variables ppbmi and wtgain have become significant variables, which means the munipulation on correlations works. In this model, variables babysex2, bhead, blength, gaweeks, mheight, mrace2, parity, smoken and wtgain can be significantly contributes to the baby weight.
+
+## Diagonostics
+```{r}
+bw_regre_df %>%
+  modelr::add_residuals(bw_regre_fit) %>%
+  modelr::add_predictions(bw_regre_fit) %>% 
+  ggplot(aes(x=pred, y =resid)) + geom_point()
+
+```
+
+From plot of residuals against fitted value, it's clear that there are presence of extremely large outliers in babyweight and a generally skewed residual distribution. However, this a relatively big sample and almost all residuals are gathering. Therefore I will keep this model as my regression model.
+
+## model compare
+
+### One using length at birth and gestational age as predictors (main effects only)
+```{r}
+model1 = lm(bwt ~ blength + gaweeks,data = bw_df)
+summary(model1)
+```
+This model can explain 57.67% of the babyweight, which means the babylength and gestational age can explain more than a half of babyweight. This is a simple and reasonable model.
+
+### One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+```{r}
+model2 = lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex ,data = bw_df)
+summary(model2)
+```
+This model can explain 68.44% of the babyweight, which is almost close to the model with all variables included, which might indicate that every two variables affects babyweight differently in different range of the other variable.
+
+## cross validation
+```{r}
+set.seed(522)
+train_df = sample_n(bw_regre_df, length(bw_regre_df[,1])*0.8)
+test_df = anti_join(bw_regre_df, train_df)
+
+bw_regre_train = lm(bwt ~.,data = train_df)
+model1_train = lm(bwt ~ blength + gaweeks,data = train_df)
+model2_train = lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex ,data = train_df)
+```
+
+## RMSE
+```{r}
+rmse(bw_regre_train, test_df)
+rmse(model1_train, test_df)
+rmse(model2_train, test_df)
+```
+
+## modelr
+```{r,warning=FALSE}
+cv_df = 
+  crossv_mc(bw_regre_df, 100) 
+
+cv_df =
+  cv_df %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    bw_regre_train = map(train, ~lm(bwt ~ ., data = .x)),
+    model1_train = map(train, ~lm(bwt ~ blength + gaweeks,data = .x)),
+    model2_train = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex ,data = .x))) %>% 
+  mutate(
+    rmse_bw_regre = map2_dbl(bw_regre_train, test, ~rmse(model = .x, data = .y)),
+    rmse_model1 = map2_dbl(model1_train, test, ~rmse(model = .x, data = .y)),
+    rmse_model2 = map2_dbl(model2_train, test, ~rmse(model = .x, data = .y)))
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()+
+  labs(title="RMSE of three models")
+```
+
+According to RMSE and residual plots of three different models, my regression model has smallest RMSE which might result from more independent variables in this model. The second smallest RMSE belongs to the model with interactions, which indicates the babyweight can be better predicted with consideration of variable interactions. The most simple model has biggest RMSE and most unsymmetrical residual plot, which means the baby length and gestational age can not predict baby weight accurately.
+
+
+
+
+
